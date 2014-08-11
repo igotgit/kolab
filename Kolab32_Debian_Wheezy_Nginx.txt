@@ -1,5 +1,8 @@
 Kolab 3.2 Installation on Debian Wheezy with NGINX
 
+Howto Based on: http://docs.kolab.org/howtos/nginx-webserver.html
+
+
 NGINX + PHP-FPM Installation
 
 For a more recent NGINX Version add the dotdeb.org Repository:
