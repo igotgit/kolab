@@ -1,0 +1,359 @@
+Kolab 3.2 Installation on Debian Wheezy with NGINX
+
+NGINX + PHP-FPM Installation
+
+For a more recent NGINX Version add the dotdeb.org Repository:
+
+Adding the repositories key prevents security warnings:
+wget http://www.dotdeb.org/dotdeb.gpg
+apt-key add dotdeb.gpg
+
+Now adding the repositores:
+echo "
+# dotdeb repositories for recent nginx and php5-fpm
+deb http://dotdeb.netmirror.org/ stable all
+deb-src http://dotdeb.netmirror.org/ stable all
+" >> /etc/apt/sources.list
+
+And setting the priority for packets from the repository higher:
+echo "
+Explanation: Highest Prio for DotDeb-packages
+Package: *
+Pin: release o=packages.dotdeb.org
+Pin-Priority: 999
+" >> /etc/apt/preferences.d/dotdeb
+
+Updating Sources and installing nginx:
+apt-get update && apt-get install nginx php5-fpm
+
+If NGINX has been installed apt-get dist-upgrade is needed
+
+
+Kolab Installation
+
+Since it's not needed and could create conflicts, remove exim:
+apt-get remove --purge exim4*
+
+
+Adding the Key for the kolab repository:
+
+wget -qO - http://obs.kolabsys.com:82/Kolab:/3.2/Debian_7.0/Release.key | apt-key add - && \
+wget -qO - http://obs.kolabsys.com:82/Kolab:/3.2:/Updates/Debian_7.0/Release.key | apt-key add -
+
+
+Adding the Kolab repository
+
+echo "deb http://obs.kolabsys.com:82/Kolab:/3.2/Debian_7.0/ ./
+deb http://obs.kolabsys.com:82/Kolab:/3.2:/Updates/Debian_7.0/ ./
+" > /etc/apt/sources.list.d/kolab.list
+
+Setting the preference for the Kolab Repository:
+
+echo "Package: *
+Pin: origin obs.kolabsys.com
+Pin-Priority: 501" > /etc/apt/preferences.d/kolab
+
+aptitude update && aptitude install kolab
+
+
+
+!!! Replace kolab.example.org with you Domain everywhere !!!
+
+Creating the NGINX Configuration
+
+cat > /etc/nginx/sites-available/kolab.example.org << EOF
+fastcgi_cache_path /var/lib/nginx/fastcgi/ levels=1:2 keys_zone=kolab.example.org:16m max_size=256m inactive=1d;
+fastcgi_temp_path /var/lib/nginx/fastcgi/tmp 1 2;
+fastcgi_cache_key "$scheme$request_method$host$request_uri";
+fastcgi_cache_use_stale error timeout invalid_header http_500;
+
+server {
+    listen                      80 default_server;
+    server_name                 kolab.example.org;
+    rewrite                     ^ https://$server_name$request_uri permanent;  # enforce https
+}
+
+server {
+    listen                      443 ssl;
+    server_name                 kolab.example.org;
+
+    access_log                  /var/log/nginx/kolab.example.org.access.log;
+    error_log                   /var/log/nginx/kolab.example.org.error.log;
+
+    ssl                         on;
+    ssl_certificate             /etc/ssl/public/kolab.example.org.bundle.crt;
+    ssl_certificate_key         /etc/ssl/private/kolab.example.org.key;
+
+    open_file_cache             max=1024 inactive=1m;
+    open_file_cache_valid       90s;
+    open_file_cache_min_uses    2;
+
+    fastcgi_param HTTPS on;
+    fastcgi_keep_conn on;
+    fastcgi_cache kolab.example.org;
+    fastcgi_cache_valid 200 302 304 10m;
+    fastcgi_cache_valid 301 1h;
+    fastcgi_cache_min_uses 2;
+    fastcgi_buffers 256 4k;
+    fastcgi_busy_buffers_size 8k;
+    fastcgi_temp_file_write_size 8k;
+
+    ##
+    ## Chwala
+    ##
+    location /chwala {
+        index index.php;
+        alias /usr/share/chwala/public_html;
+
+        client_max_body_size 30M; # set maximum upload size
+
+        # enable php
+        location ~ \.php$ {
+            include fastcgi_params;
+            fastcgi_pass unix:/var/run/php-fpm.kolab.example.org.chwala.sock;
+            fastcgi_param SCRIPT_FILENAME $request_filename;
+            # Without this, PHPSESSION is replaced by webadmin-api X-Session-Token
+            fastcgi_param PHP_VALUE "session.auto_start=0
+                session.use_cookies=0";
+            fastcgi_pass_header X-Session-Token;
+        }
+    }
+
+    ##
+    ## iRony
+    ##
+    location /iRony {
+        alias  /usr/share/iRony/public_html/index.php;
+
+        client_max_body_size 30M; # set maximum upload size
+
+        # Make Apple Calendar.app and Contacts.app happy:
+        rewrite ^/.well-known/caldav / last;
+        rewrite ^/.well-known/carddav / last;
+
+        # If Nginx was built with http_dav_module:
+        dav_methods  PUT DELETE MKCOL COPY MOVE; # PROPFIND;
+        # Required Nginx to be built with nginx-dav-ext-module:
+        dav_ext_methods PROPFIND OPTIONS;
+
+        include fastcgi_params;
+        fastcgi_index index.php;
+        fastcgi_pass unix:/var/run/php-fpm.kolab.example.org.iRony.sock;
+        fastcgi_param SCRIPT_FILENAME $request_filename;
+    }
+
+    ##
+    ## Kolab Webclient
+    ##
+    location /roundcubemail {
+        index index.php;
+        alias /usr/share/roundcubemail;
+
+        client_max_body_size 30M; # set maximum upload size for mail attachments
+
+        # Deny all attempts to access hidden files such as .htaccess, .htpasswd, .DS_Store (Mac).
+        location ~ ^/roundcubemail/(README(.md)?|INSTALL|LICENSE|CHANGELOG|UPGRADING)$ {
+            deny all;
+        }
+
+        location ~ ^/roundcubemail/(bin|SQL|config|logs)/ {
+            deny all;
+        }
+
+        location ~ ^/roundcubemail/program/(include|lib|localization|steps)/ {
+            deny all;
+        }
+
+        # enable php
+        location ~ \.php$ {
+            include fastcgi_params;
+            fastcgi_split_path_info ^(.+\.php)(/.*)$;
+            fastcgi_pass unix:/var/run/php-fpm.kolab.example.org.roundcubemail.sock;
+            fastcgi_param SCRIPT_FILENAME $request_filename;
+        }
+    }
+
+    ##
+    ## Kolab Web Administration Panel (WAP) and API
+    ##
+    location /kolab-webadmin {
+        index index.php;
+        alias /usr/share/kolab-webadmin/public_html;
+        try_files $uri $uri/ @kolab-wapapi;
+
+        # enable php
+        location ~ \.php$ {
+            include fastcgi_params;
+            fastcgi_pass unix:/var/run/php-fpm.kolab.example.org.kolab-webadmin.sock;
+            fastcgi_param SCRIPT_FILENAME $request_filename;
+            # Without this, PHPSESSION is replaced by webadmin-api X-Session-Token
+            fastcgi_param PHP_VALUE "session.auto_start=0
+                session.use_cookies=0";
+            fastcgi_pass_header X-Session-Token;
+        }
+    }
+
+    # kolab-webadmin api
+    location @kolab-wapapi {
+        rewrite ^/kolab-webadmin/api/(.*)\.(.*)$ /kolab-webadmin/api/index.php?service=$1&method=$2 last;
+    }
+
+    ##
+    ## Kolab syncroton ActiveSync
+    ##
+    location /Microsoft-Server-ActiveSync {
+        alias  /usr/share/kolab-syncroton/index.php;
+
+        client_max_body_size 30M; # set maximum upload size for mail attachments
+
+        include fastcgi_params;
+        fastcgi_index index.php;
+        fastcgi_pass unix:/var/run/php-fpm.kolab.example.org.kolab-syncroton.sock;
+        fastcgi_param SCRIPT_FILENAME /usr/share/kolab-syncroton/index.php;
+    }
+
+    ##
+    ## Kolab Free/Busy
+    ##
+    location /freebusy {
+        alias  /usr/share/kolab-freebusy/public_html/index.php;
+
+        include fastcgi_params;
+        fastcgi_index index.php;
+        fastcgi_pass unix:/var/run/php-fpm.kolab.example.org.kolab-freebusy.sock;
+        fastcgi_param SCRIPT_FILENAME /usr/share/kolab-freebusy/public_html/index.php;
+    }
+}
+EOF
+
+Create Symlink to the nginx enabled sites:
+ln -s /etc/nginx/sites-available/kolab.example.org /etc/nginx/sites-enabled/kolab.example.org
+
+Remove Apache2 from the autostart:
+update-rc.d -f apache2 remove
+
+
+Creating PHP-FPM-Pools
+
+cat > /etc/php5/fpm/pool.d/kolab.example.org.chwala.conf << EOF
+[kolab.example.org.chwala]
+user = www-data
+group = www-data
+listen.owner = www-data
+listen.group = www-data
+listen = /var/run/php-fpm.kolab.example.org.chwala.sock
+pm = dynamic
+pm.max_children = 40
+pm.start_servers = 15
+pm.min_spare_servers = 10
+pm.max_spare_servers = 20
+chdir = /
+EOF
+
+cat > /etc/php5/fpm/pool.d/kolab.example.org.freebusy.conf << EOF
+[kolab.example.org.freebusy]
+user = www-data
+group = www-data
+listen.owner = www-data
+listen.group = www-data
+listen = /var/run/php-fpm.kolab.example.org.kolab-freebusy.sock
+pm = dynamic
+pm.max_children = 40
+pm.start_servers = 15
+pm.min_spare_servers = 10
+pm.max_spare_servers = 20
+chdir = /
+EOF
+
+cat > /etc/php5/fpm/pool.d/kolab.example.org.iRony.conf << EOF
+[kolab.example.org.iRony]
+user = www-data
+group = www-data
+listen.owner = www-data
+listen.group = www-data
+listen = /var/run/php-fpm.kolab.example.org.iRony.sock
+pm = dynamic
+pm.max_children = 40
+pm.start_servers = 15
+pm.min_spare_servers = 10
+pm.max_spare_servers = 20
+chdir = /
+EOF
+
+cat > /etc/php5/fpm/pool.d/kolab.example.org.roundcubemail.conf << EOF
+[kolab.example.org.roundcubemail]
+user = www-data
+group = www-data
+listen.owner = www-data
+listen.group = www-data
+listen = /var/run/php-fpm.kolab.example.org.roundcubemail.sock
+pm = dynamic
+pm.max_children = 40
+pm.start_servers = 15
+pm.min_spare_servers = 10
+pm.max_spare_servers = 20
+chdir = /
+# Derived from .htaccess of roundcube
+php_flag[display_errors] = Off
+php_flag[log_errors] = On
+
+php_value[upload_max_filesize] = 30M
+php_value[post_max_size] = 30M
+
+php_flag[zlib.output_compression] = Off
+php_flag[magic_quotes_gpc] = Off
+php_flag[magic_quotes_runtime] = Off
+php_flag[zend.ze1_compatibility_mode] = Off
+php_flag[suhosin.session.encrypt] = Off
+
+php_flag[session.auto_start] = Off
+php_value[session.gc_maxlifetime] = 21600
+php_value[session.gc_divisor] = 500
+php_value[session.gc_probability] = 1
+
+# http://bugs.php.net/bug.php?id=30766
+php_value[mbstring.func_overload] = 0
+EOF
+
+cat > /etc/php5/fpm/pool.d/kolab.example.org.syncroton.conf << EOF
+[kolab.example.org.syncroton]
+user = www-data
+group = www-data
+listen.owner = www-data
+listen.group = www-data
+listen = /var/run/php-fpm.kolab.example.org.kolab-syncroton.sock
+pm = dynamic
+pm.max_children = 40
+pm.start_servers = 15
+pm.min_spare_servers = 10
+pm.max_spare_servers = 20
+chdir = /
+php_flag[suhosin.session.encrypt] = Off
+EOF
+
+cat > /etc/php5/fpm/pool.d/kolab.example.org.kolab-webadmin.conf << EOF
+[kolab.example.org.kolab-webadmin]
+user = www-data
+group = www-data
+listen.owner = www-data
+listen.group = www-data
+listen = /var/run/php-fpm.kolab.example.org.kolab-webadmin.sock
+pm = dynamic
+pm.max_children = 40
+pm.start_servers = 15
+pm.min_spare_servers = 10
+pm.max_spare_servers = 20
+chdir = /
+EOF
+
+
+Configure your timezone in php.ini
+
+/etc/php5/fpm/php.ini
+    date.timezone = Europe/Berlin
+	
+Use the credentials created during kolab-setup and login
+with the User: cn=Directory Manager in https://kolab.example.org/kolab-webadmin
+
+Create a kolab new user with the account-type "Kolab User" there
+to use it e.g. with https://kolab.example.org/roundcubemail
